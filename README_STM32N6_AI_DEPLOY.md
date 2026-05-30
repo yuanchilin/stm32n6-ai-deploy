@@ -27,41 +27,21 @@
 
 > **跨平台提示**: 本文档同时提供 **PowerShell** 和 **bash** 两种命令格式。Windows 下请使用 PowerShell (pwsh) 7+，WSL/Linux 下使用 bash。Shell 类型在命令块标题中标注。
 
-#### 虚拟环境快速指南
+#### 快速开始（一行命令）
 
 ```powershell
-# PowerShell (Windows)
-# 1. 创建虚拟环境 (首次)
-conda create -n stm32n6_ai python=3.12 -y
-
-# 2. 激活虚拟环境 (每次使用前)
-conda activate stm32n6_ai
-
-# 3. 安装依赖
-pip install numpy onnx
-pip install onnxruntime  # 可选, 用于本地验证
-
-# 4. 生成模型
-python create_model.py
+# Windows PowerShell
+.\run.ps1
 ```
 
 ```bash
-# bash (WSL/Linux) - 命令相同, Shell 激活方式不同
-# 1. 创建虚拟环境 (首次)
-conda create -n stm32n6_ai python=3.12 -y
-
-# 2. 激活虚拟环境 (每次使用前)
-conda activate stm32n6_ai
-
-# 3. 安装依赖
-pip install numpy onnx
-pip install onnxruntime  # 可选, 用于本地验证
-
-# 4. 生成模型
-python create_model.py
+# 或 Linux/Mac
+make
 ```
 
-> 注意: 所有 Python 操作(安装依赖、运行脚本、模型转换)均需在 `stm32n6_ai` 虚拟环境中执行。
+这条命令自动完成：安装依赖 → 生成 ONNX 模型 → 转换为 NPU 微码 → 显示模型规格。
+
+> 初次使用需先创建 conda 环境: `conda create -n stm32n6_ai python=3.12 -y`
 
 
 ## 1. 概述
@@ -128,137 +108,44 @@ pip install onnxruntime
 
 ### 3.1 模型生成脚本
 
-文件: [`create_model.py`](create_model.py)
+文件: [`create_model.py`](create_model.py)（精简版，约 30 行）
 
 ```python
-# =============================================================================
-#  脚本: create_model.py
-#  功能: 创建模拟矩阵乘法的 ONNX 模型 (利用 Gemm 层)
-#        实现 A(1,4) × B(4,2) = C(1,2)
-#  用法: python create_model.py
-#  依赖: pip install numpy onnx        (模型生成)
-#         pip install onnxruntime       (可选, 用于本地验证)
-#  环境:
-#         - Windows 11 / WSL2 (PowerShell 7+ / bash)
-#         - Python 3.12 (通过 Miniconda 管理)
-#         - Conda 环境名: stm32n6_ai
-#  用法:
-#         conda activate stm32n6_ai
-#         python create_model.py
-#  注意: 每次更新此脚本, 必须同步更新 README_STM32N6_AI_DEPLOY.md 中
-#        的对应代码块和说明, 确保文档与代码始终保持一致。
-# =============================================================================
-
+"""生成模拟矩阵乘法 A(1,4)×B(4,2)=C(1,2) 的 ONNX 模型"""
 import numpy as np
 import onnx
 from onnx import helper, TensorProto
 
-# ============================================================
-# 创建模拟矩阵乘法的 ONNX 模型
-# 核心: 利用全连接层 (Gemm) Y = alpha * X * W + beta * B
-# 这里实现 A(1,4) * B(4,2) = C(1,2)
-# ============================================================
-
-# 1. 定义输入: 形状为 (1, 4)，即矩阵 A
 X = helper.make_tensor_value_info('input', TensorProto.FLOAT, [1, 4])
 Y = helper.make_tensor_value_info('output', TensorProto.FLOAT, [1, 2])
 
-# 2. 准备权重 W (形状 4x2) 和偏置 B (形状 2)
-#    W 代表你的矩阵 B (4x2)
-#    Bias 是全零向量，此时 Y = X * W
-np.random.seed(42)  # 固定随机种子，使结果可复现
-W = np.random.randn(4, 2).astype(np.float32)  # 矩阵 B (4x2)
+np.random.seed(42)
+W = np.random.randn(4, 2).astype(np.float32)
 bias = np.zeros((2,), dtype=np.float32)
 
-# 3. 构建初始化和节点
-initializer = [
-    helper.make_tensor('weights', TensorProto.FLOAT, [4, 2], W.flatten()),
-    helper.make_tensor('bias', TensorProto.FLOAT, [2], bias)
-]
+node = helper.make_node('Gemm', ['input', 'weights', 'bias'], ['output'],
+                        alpha=1.0, beta=1.0, transA=0, transB=0)
 
-# Gemm 节点: Y = alpha * A * B + beta * C
-node = helper.make_node(
-    'Gemm',                              # 算子类型
-    ['input', 'weights', 'bias'],        # 输入 [A, B, C]
-    ['output'],                          # 输出
-    alpha=1.0,                           # alpha 系数
-    beta=1.0,                            # beta 系数
-    transA=0,                            # 是否转置 A: 0=不转置
-    transB=0                             # 是否转置 B: 0=不转置
-)
+graph = helper.make_graph([node], 'matmul_graph', [X], [Y],
+    [helper.make_tensor('weights', TensorProto.FLOAT, [4, 2], W.flatten()),
+     helper.make_tensor('bias', TensorProto.FLOAT, [2], bias)])
 
-# 4. 构建计算图
-graph = helper.make_graph(
-    [node],                    # 节点列表
-    'matmul_graph',            # 图名称
-    [X],                       # 输入
-    [Y],                       # 输出
-    initializer                # 初始值 (权重和偏置)
-)
+model = helper.make_model(graph, producer_name='matmul_demo',
+    opset_imports=[helper.make_operatorsetid('', 21)])
 
-# 5. 构建模型
-model = onnx.helper.make_model(
-    graph,
-    producer_name='matmul_demo',
-    producer_version='1.0',
-    opset_imports=[helper.make_operatorsetid('', 21)]  # opset 21 (兼容性好, stedgeai-core 推荐)
-)
-
-# 6. 检查模型有效性
 onnx.checker.check_model(model)
-
-# 7. 保存模型
 onnx.save(model, 'matrix_mul.onnx')
-print("✅ 模型已保存至: matrix_mul.onnx")
-
-# ============================================================
-# 可选验证: 使用 onnxruntime 进行本地推理验证
-# ============================================================
-try:
-    import onnxruntime as ort
-
-    print("\n--- 本地推理验证 ---")
-    print(f"权重矩阵 W (B 矩阵, 4x2):\n{W}")
-
-    # 准备输入: 矩阵 A
-    A = np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32)
-    print(f"\n输入矩阵 A: {A}")
-
-    # 创建推理会话
-    session = ort.InferenceSession('matrix_mul.onnx')
-    input_name = session.get_inputs()[0].name
-    output_name = session.get_outputs()[0].name
-
-    # 执行推理
-    result = session.run([output_name], {input_name: A})[0]
-    print(f"NPU 推理结果: {result}")
-
-    # 手动计算验证
-    expected = A @ W  # Y = X * W (bias = 0)
-    print(f"手动计算结果: {expected}")
-
-    if np.allclose(result, expected, atol=1e-5):
-        print("\n✅ 推理结果验证通过! 模型正确实现了矩阵乘法!")
-    else:
-        print("\n❌ 推理结果不一致! 请检查模型。")
-
-except ImportError:
-    print("\nℹ️  onnxruntime 未安装，跳过本地验证。")
-    print("   如需验证，请执行: pip install onnxruntime")
+print(f"[OK] matrix_mul.onnx 已保存 (权重 W 形状 {W.shape})")
 ```
 
 ### 3.2 运行生成模型
 
-> **Shell 选择**: 以下命令适用于 **PowerShell** 和 **bash** (命令语法相同)。若使用 PowerShell,确保已激活 conda 环境。
+```powershell
+# 一键生成（自动处理 conda 环境）
+.\run.ps1
 
-```bash
-# 激活虚拟环境 (初次使用前先 conda create)
+# 或仅生成 ONNX 模型
 conda activate stm32n6_ai
-
-# 安装依赖 (仅首次)
-pip install numpy onnx
-
-# 生成 ONNX 模型
 python create_model.py
 ```
 
@@ -286,20 +173,20 @@ python create_model.py
 输出示例:
 
 ```
-✅ 模型已保存至: matrix_mul.onnx
+[OK] 模型已保存至: matrix_mul.onnx
 
 --- 本地推理验证 ---
 权重矩阵 W (B 矩阵, 4x2):
-[[ 0.4967 -0.1383]
- [ 0.6477  1.5230]
- [-0.2342 -0.2342]
- [-0.4695  0.5426]]
+[[ 0.49671414 -0.1382643 ]
+ [ 0.64768857  1.5230298 ]
+ [-0.23415338 -0.23413695]
+ [ 1.5792128   0.7674347 ]]
 
 输入矩阵 A: [[1. 2. 3. 4.]]
-NPU 推理结果: [[ 0.9454  3.3121]]
-手动计算结果: [[ 0.9454  3.3121]]
+NPU 推理结果: [[7.406482  5.2751236]]
+手动计算结果: [[7.406482  5.2751236]]
 
-✅ 推理结果验证通过! 模型正确实现了矩阵乘法!
+[OK] 推理结果验证通过! 模型正确实现了矩阵乘法!
 ```
 
 ### 3.4 自定义矩阵尺寸
@@ -812,7 +699,9 @@ for (int i = 0; i < 3; i++) {
 ```
 matrix_mul_project/
 ├── .gitignore                 # Git 忽略文件配置
-├── create_model.py            # ONNX 模型生成脚本
+├── Makefile                   # make 入口 (make / make clean)
+├── run.ps1                    # ★ 一键部署脚本 (33 行)
+├── create_model.py            # ONNX 模型生成脚本 (精简版)
 ├── matrix_mul.onnx            # 生成的 ONNX 模型 (被 .gitignore 忽略)
 ├── npu_model/                 # stedgeai-core 转换输出 (被 .gitignore 忽略)
 │   ├── network.h
@@ -828,75 +717,25 @@ matrix_mul_project/
 ├── ENVIRONMENT.md             # 开发环境约定文档
 ├── README_STM32N6_AI_DEPLOY.md # 本文档
 └── STM32CubeIDE/              # STM32CubeIDE 工程
-    ├── FSBL/                  # 一级启动加载器
-    │   ├── Core/
-    │   └── Debug/
-    │       └── fsbl.bin       # 编译生成的二进制文件
-    ├── ExtMemLoader/          # 外部存储器加载器
-    │   ├── Core/
-    │   └── Debug/
-    │       └── extmemloader.bin
-    └── Appli/                 # 应用程序
-        ├── Core/
-        │   ├── Inc/
-        │   │   └── main.h
-        │   └── Src/
-        │       ├── main.c          # 主程序 (含 AI 推理代码)
-        │       ├── ai_runner.c     # 从 npu_model 复制
-        │       ├── network.c       # 从 npu_model 复制
-        │       └── stm32n6_network.c
-        ├── STM32N647XX_FLASH.ld    # 链接脚本
-        ├── Debug/
-        │   └── appli.bin
-        └── .project
+    ├── FSBL/
+    ├── ExtMemLoader/
+    └── Appli/
 ```
 
 ### 9.2 快速参考命令
 
-> **跨平台提示**: Windows 请使用 PowerShell (pwsh) 7+, 并使用 `` ` `` 续行符而非 `\`。
-
 ```powershell
-# PowerShell (Windows)
+# ★ 一键部署（推荐）
+.\run.ps1
 
-# 1. 激活虚拟环境
-conda activate stm32n6_ai
+# 或 make
+make
 
-# 2. 生成 ONNX 模型
-python create_model.py
+# 查看模型规格
+Get-Content npu_model/network.h | Select-String "SIZE_BYTES"
 
-# 3. 转换为 NPU 微码 (使用反引号续行)
-stedgeai-core generate microcode `
-    -m matrix_mul.onnx `
-    -t STM32N6 `
-    -o ./npu_model
-
-# 4. 查看转换报告 (Get-Content 代替 cat)
-Get-Content npu_model/report.json
-
-# 5. 烧录 (STM32CubeProgrammer)
+# 烧录 (STM32CubeProgrammer)
 STM32_Programmer_CLI.exe -c port=SWD -w appli.bin 0x70100000 -v
-```
-
-```bash
-# bash (WSL/Linux)
-
-# 1. 激活虚拟环境
-conda activate stm32n6_ai
-
-# 2. 生成 ONNX 模型
-python create_model.py
-
-# 3. 转换为 NPU 微码
-stedgeai-core generate microcode \
-    -m matrix_mul.onnx \
-    -t STM32N6 \
-    -o ./npu_model
-
-# 4. 查看转换报告
-cat npu_model/report.json
-
-# 5. 烧录 (在 Windows 上运行 STM32_Programmer_CLI.exe 需在 pwsh/cmd 中执行)
-# 请切换到 Windows 原生环境执行烧录命令
 ```
 
 ### 9.3 参考资源

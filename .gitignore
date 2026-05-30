@@ -1,9 +1,12 @@
-# ONNX 模型二进制文件 (可重新生成)
+# ONNX 模型文件（可重新生成）
 *.onnx
 
-# stedgeai-core 转换输出 (可重新生成)
+# stedgeai-core 转换输出（可重新生成）
 npu_model/
 !.gitkeep
+
+# st_ai_ws 构建产物（可重新生成）
+st_ai_ws/
 
 # Python 缓存
 __pycache__/

@@ -11,6 +11,21 @@
 >
 > 文档与代码同等重要，代码变更应伴随相应文档更新，保持项目文档与实现始终一致。
 
+## 0.1 项目文件组织
+
+```
+项目根目录（简化后，以 Onnx 为例）：
+├── run.ps1       ← 一键部署脚本（唯一入口）
+├── create_model.py
+├── Makefile      ← make 入口
+├── matrix_mul.onnx
+├── npu_model/
+├── README_*.md
+└── ENVIRONMENT.md
+```
+
+> 每个项目只保留一个入口脚本（`run.ps1`），不将步骤拆到多个脚本文件中。
+
 ---
 
 ## 1. 核心偏好
@@ -38,7 +53,13 @@
 - ✅ 优先使用 Node.js 脚本或 pwsh 处理文件操作
 - ✅ 路径操作统一使用 `path` 模块或 `fs` 的跨平台 API
 
-### 1.3 Git 仓库跨平台
+### 1.3 脚本最佳实践
+
+- **不拆分步骤**: 多步流程合并为一个脚本（`run.ps1`），不要拆到多个文件中
+- **pwsh 输出问题**: conda 环境执行命令用临时 bat 绕过 `conda run` 的流捕获，避免乱码
+- **进度条**: 使用 `$ProgressPreference='SilentlyContinue'` 抑制 Remove-Item 进度条
+
+### 1.4 Git 仓库跨平台
 
 | 要求 | 配置 |
 |------|------|
