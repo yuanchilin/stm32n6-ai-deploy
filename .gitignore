@@ -1,9 +1,12 @@
 # ONNX 模型文件（可重新生成）
 *.onnx
 
-# stedgeai-core 转换输出（可重新生成）
-npu_model/
-!.gitkeep
+# STM32CubeIDE AI 目录（run.ps1 步骤3自动生成，不提交）
+stm32n647_appli/AI/
+
+# 二进制/十六进制文件（可重新生成）
+*.bin
+*.hex
 
 # st_ai_ws 构建产物（可重新生成）
 st_ai_ws/
@@ -27,9 +30,7 @@ Thumbs.db
 .DS_Store
 
 # STM32CubeIDE 工程生成文件
-STM32CubeIDE/**/Debug/
-STM32CubeIDE/**/Release/
-*.bin
-*.hex
+**/Debug/
+**/Release/
 *.elf
 *.map
