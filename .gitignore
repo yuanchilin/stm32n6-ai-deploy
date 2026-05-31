@@ -34,3 +34,7 @@ Thumbs.db
 **/Release/
 *.elf
 *.map
+
+# STM32CubeIDE 工作区设置（含本地路径，IDE 自动生成）
+**/.settings/
+*.launch
