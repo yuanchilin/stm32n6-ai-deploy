@@ -27,6 +27,9 @@
 #endif
 #include "led.h"
 #include "uart.h"
+#include "network.h"
+#include "network_data.h"
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -55,6 +58,11 @@ XSPI_HandleTypeDef hxspi1;
 #ifdef DEBUG
 static HyperRAM_ObjectTypeDef HyperRAMObject = {0};
 #endif
+
+/* AI 网络上下文缓冲区 */
+static uint8_t ai_network_ctx_buf[STAI_NETWORK_CONTEXT_SIZE] __attribute__((aligned(STAI_NETWORK_CONTEXT_ALIGNMENT)));
+/* AI 激活缓冲区 */
+static uint8_t ai_activations_buf[STAI_NETWORK_ACTIVATIONS_SIZE_BYTES] __attribute__((aligned(STAI_NETWORK_ACTIVATION_1_ALIGNMENT)));
 
 /* USER CODE END PV */
 
@@ -125,12 +133,78 @@ int main(void)
   led_init();         /* 初始化LED */
   uart_init(115200);  /* 初始化串口 */
 
+  /* ---- AI 神经网络初始化 ---- */
+  stai_network* network = (stai_network*)ai_network_ctx_buf;
+  stai_return_code ret = stai_network_init(network);
+  if (ret != STAI_SUCCESS)
+  {
+    printf("AI 网络初始化失败! 错误码: %d\r\n", ret);
+  }
+  else
+  {
+    printf("AI 网络初始化成功\r\n");
+
+    /* 设置激活缓冲区 */
+    stai_ptr activations[STAI_NETWORK_ACTIVATIONS_NUM];
+    activations[0] = (stai_ptr)ai_activations_buf;
+    ret = stai_network_set_activations(network, (const stai_ptr*)activations, STAI_NETWORK_ACTIVATIONS_NUM);
+    if (ret != STAI_SUCCESS)
+    {
+      printf("设置激活缓冲区失败! 错误码: %d\r\n", ret);
+    }
+
+    /* 设置权重缓冲区 (使用预生成的权重数据) */
+    stai_ptr weights[STAI_NETWORK_WEIGHTS_NUM];
+    weights[0] = (stai_ptr)g_network_weights_array;
+    ret = stai_network_set_weights(network, (const stai_ptr*)weights, STAI_NETWORK_WEIGHTS_NUM);
+    if (ret != STAI_SUCCESS)
+    {
+      printf("设置权重缓冲区失败! 错误码: %d\r\n", ret);
+    }
+  }
+
+  printf("\r\n===== STM32N647 AI 演示 =====\r\n");
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /* 每 5000 次循环执行一次 AI 推理 */
+    if ((times % 5000) == 0)
+    {
+      float input_data[STAI_NETWORK_IN_1_SIZE] = {1.0f, 2.0f, 3.0f, 4.0f};
+      float* output_data = NULL;
+
+      stai_ptr inputs[STAI_NETWORK_IN_NUM];
+      stai_ptr outputs[STAI_NETWORK_OUT_NUM];
+      stai_size n_inputs, n_outputs;
+
+      if (stai_network_get_inputs(network, inputs, &n_inputs) == STAI_SUCCESS &&
+          stai_network_get_outputs(network, outputs, &n_outputs) == STAI_SUCCESS)
+      {
+        memcpy(inputs[0], input_data, STAI_NETWORK_IN_1_SIZE_BYTES);
+
+        ret = stai_network_run(network, STAI_MODE_SYNC);
+        if (ret == STAI_SUCCESS)
+        {
+          output_data = (float*)outputs[0];
+          printf("\r\n===== AI 推理结果 =====\r\n");
+          printf("输入: [%.2f, %.2f, %.2f, %.2f]\r\n",
+                 input_data[0], input_data[1], input_data[2], input_data[3]);
+          printf("输出: [%.6f, %.6f]\r\n",
+                 output_data[0], output_data[1]);
+          printf("========================\r\n\r\n");
+        }
+        else
+        {
+          printf("AI 推理失败! 错误码: %d\r\n", ret);
+        }
+      }
+    }
+
+    /* 处理串口接收数据 */
     if (g_uart_rx_sta & 0x8000)
     {
       len = g_uart_rx_sta & 0x3FFF;
@@ -139,24 +213,15 @@ int main(void)
       printf("\r\n\r\n");
       g_uart_rx_sta = 0;
     }
-    else
+
+    /* LED 闪烁指示系统运行 */
+    if ((times % 30) == 0)
     {
-      if ((times % 5000) == 0)
-      {
-        printf("\r\n正点原子 N647开发板 串口通信实验\r\n");
-        printf("正点原子@ALIENTEK\r\n\r\n\r\n");
-      }
-      if ((times % 200) == 0)
-      {
-        printf("请输入数据，以回车键结束\r\n");
-      }
-      if ((times % 30) == 0)
-      {
-        LED0_TOGGLE();
-      }
-      times++;
-      HAL_Delay(10);
+      LED0_TOGGLE();
     }
+
+    times++;
+    HAL_Delay(10);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

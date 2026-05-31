@@ -4,7 +4,7 @@
 .DESCRIPTION
     从 Python 生成 ONNX → 调用 stedgeai 转换 NPU 微码 → 生成烧录映像。
     
-    需要先执行 .\deploy.ps1 的依赖准备。
+    需要先执行 .\download.ps1 的依赖准备。
 
 .PARAMETER Clean
     仅清理所有旧产物（ONNX、AI/、logs、st_ai_ws），不运行
@@ -80,7 +80,7 @@ if (Test-Path $elf) {
     & arm-none-eabi-objcopy -O binary $elf $bin
     Write-Host "  → $bin ($((Get-Item $bin).Length)B)"
     Write-Host ""
-    Write-Host "  deploy.ps1 将自动使用 .bin 格式写入外部 Flash (0x70000000)"
+    Write-Host "  download.ps1 将自动使用 .bin 格式写入外部 Flash (0x70000000)"
 } else {
     Write-Warning "  $elf 不存在，跳过 hex/bin 生成"
     Write-Warning "  请用 STM32CubeIDE 编译 stm32n647_appli/ 后复制 network.hex"

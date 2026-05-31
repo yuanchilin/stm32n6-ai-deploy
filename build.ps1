@@ -114,7 +114,7 @@ try {
 
         Write-Host "    [OK] 烧录映像已生成"
         Write-Host ""
-        Write-Host "下一步:  .\deploy.ps1  烧录到开发板"
+        Write-Host "下一步:  .\download.ps1  烧录到开发板"
     }
 }
 finally {

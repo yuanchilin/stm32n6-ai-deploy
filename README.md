@@ -2,9 +2,9 @@
 
 > 正点原子 STM32N647 核心板 · NPU 矩阵乘法部署方案
 
-利用 ONNX **Gemm** 算子（全连接层）将矩阵乘法伪装成 AI 模型，让 NPU 硬件加速执行 `C = A × B`。
+利用 ONNX **Gemm** 算子（全连接层）将矩阵乘法伪装为 AI 模型，借助 NPU 硬件加速执行 `C = A × B`。
 
-```
+```raw
 输入: input (1, 4)   ← 矩阵 A
          │
          ▼
@@ -16,237 +16,304 @@
 ```
 
 ---
+- [快速开始](#快速开始)
+- [构建链总览](#构建链总览)
+- [硬件规格](#硬件规格)
+- [开发环境](#开发环境)
+- [项目结构](#项目结构)
+- [软件架构](#软件架构)
+- [create_model.py 原理](#create_modelpy-原理)
+- [CMake 构建说明](#cmake-构建说明)
+- [内存布局](#内存布局)
+- [常见问题](#常见问题)
+
+---
 
 ## 快速开始
 
-### 一键生成（ONNX 模型 → NPU 微码）
+### 1. 生成 ONNX 模型 → 转换 NPU 微码
 
 ```powershell
 # Windows (PowerShell 7+)
-.\run.ps1          # 直接运行
-.\run.ps1 -Clean   # 仅清理旧产物，不运行
-.\run.ps1 -Rebuild # 先清理，再重新运行
+.\run.ps1          # 一键完成：安装依赖 → 生成 ONNX → 调用 stedgeai-core 转 NPU 微码
+.\run.ps1 -Clean   # 仅清理旧产物
+.\run.ps1 -Rebuild # 先清理再运行
 ```
 
 ```bash
 # Linux / WSL
-make               # 直接运行（等效 .\run.ps1）
-make run CLEAN=1   # 仅清理（等效 .\run.ps1 -Clean）
-make run REBUILD=1 # 清理后重新运行（等效 .\run.ps1 -Rebuild）
+make               # 等效 .\run.ps1
+make run CLEAN=1   # 等效 .\run.ps1 -Clean
+make run REBUILD=1 # 等效 .\run.ps1 -Rebuild
 ```
 
-自动完成：安装依赖 → 生成 `matrix_mul.onnx` → 调用 `stedgeai-core` 转换为 NPU 微码 → 显示模型规格。
+产物自动输出到 `stm32n647_appli/AI/`（`network.h/c`、`network_data.h/c` 等）。
 
-### 编译固件（CMake 交叉编译）
-
-一键编译（推荐）：
+### 2. 编译固件
 
 ```powershell
-.\build.ps1
+.\build.ps1                      # 一键 CMake 交叉编译
+.\build.ps1 -Clean               # 仅清理
+.\build.ps1 -Rebuild             # 清理后重新编译
+.\build.ps1 -BuildDir Release    # 编译 Release 版
+.\build.ps1 -NoHex               # 不自动生成 hex/bin
 ```
 
-等效的手动分步编译：
+产物：`Debug/Network.elf` + `Debug/Network.hex` + `Debug/Network.bin`
+
+### 3. 下载到开发板并运行
 
 ```powershell
-cd stm32n647_appli
-cmake -DCMAKE_TOOLCHAIN_FILE=cubeide-gcc.cmake -S . -B Debug -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug
-make -C Debug -j
+.\download.ps1
 ```
 
-`build.ps1` 还支持 clean / rebuild、Release 模式、指定线程数等选项：
+`download.ps1` 自动完成两步：
 
-```powershell
-.\build.ps1 -Clean             # 仅清理构建产物，不编译
-.\build.ps1 -Rebuild           # 先清理，再重新编译
-.\build.ps1 -BuildDir Release  # 编译 Release 版
-.\build.ps1 -NoHex             # 编译后不自动生成烧录映像
-```
+1. `pyocd load .\stm32n647_appli\Debug\Network.hex` — 通过 SWD 加载到内部 SRAM
+2. 从 `Network.bin` 读取向量表前两个 word（SP 和 PC），通过 pyocd commander 设置寄存器并直接运行：
 
-编译产物：`Debug/Network.elf` + `Debug/Network.hex` + `Debug/Network.bin`
+   ```powershell
+   $bin = [System.IO.File]::ReadAllBytes("$(Get-Location)\stm32n647_appli\Debug\Network.bin")
+   $sp  = [System.BitConverter]::ToUInt32($bin, 0)
+   $pc  = [System.BitConverter]::ToUInt32($bin, 4)
+   pyocd commander -c "halt; wreg sp 0x$('{0:X8}' -f $sp); wreg pc 0x$('{0:X8}' -f $pc); g"
+   ```
 
-### 烧录到开发板
+> 固件直接运行于内部 RAM，pyocd commander **无需**指定 `--target` 即可读写寄存器。
 
-**前提**：开发板设为 **Development boot 模式**（BOOT1 接 3.3V）
+### 4. 串口查看输出
 
-```powershell
-.\deploy.ps1
-```
+连接 USART1（PB6 TX / PB7 RX，115200 8N1）即可看到：
 
-### 运行
-1. 断开电源，BOOT0/GND、BOOT1/GND（Flash boot 模式），重新上电
-2. 连接串口（USART1, PB6(TX)/PB7(RX), 115200, 8N1）
+- AI 网络初始化状态（成功/失败）
+- 每 5000 次循环自动推理，输入 `[1, 2, 3, 4]` 并打印结果
+- 用户输入回车回显
 
 ---
 
-## 项目结构
+## 构建链总览
 
 ```
-├── build.ps1               # ★ CMake 交叉编译脚本（编译固件 + 生成烧录映像）
-├── run.ps1                 # ★ 一键部署入口（生成 ONNX → 转换 NPU 微码）
-├── deploy.ps1              # 烧录脚本（烧录 network.hex 到内部 Flash）
-├── create_model.py         # ONNX 模型生成脚本（~30 行）
-├── Makefile                # make 入口（代理 run.ps1 / build.ps1）
-├── matrix_mul.onnx         # 生成的 ONNX 模型（.gitignore）
-├── stm32n647_appli/        # STM32N647 应用程序工程
-│   ├── AI/                     # ⚡ NPU 微码输出（run.ps1 直接生成到此目录）
-│   │   ├── network.h/c         # 网络 API（输入/输出维度、权重尺寸等）
-│   │   ├── network_data.h/c    # 网络权重数据（Gemm 的 W 和 bias）
-│   │   ├── network_details.h   # 网络详细信息
-│   │   ├── stai.h              # ST.AI 运行时 API 头文件
-│   │   └── ...
-│   ├── Sources/               # 裸机源文件（无 HAL 依赖）
-│   │   ├── main.c              # ★ 主程序：初始化 + AI 推理 + printf 输出
-│   │   ├── syscalls.c          # 系统调用（_sbrk 等）
-│   │   └── sysmem.c            # 系统内存管理（堆区定义）
-│   ├── Startup/                # 启动文件
-│   │   └── startup_stm32n647a0hxq.s  # 汇编启动文件（Reset_Handler, 中断向量表）
-│   ├── Debug/                  # CMake 编译输出
-│   │   ├── Network.elf         # 最终固件
-│   │   └── test.map            # 链接映射表
-│   ├── CMakeLists.txt          # CMake 构建配置
-│   ├── CMakePresets.json       # CMake 预设（CubeIDE 集成）
-│   ├── cubeide-gcc.cmake       # ARM GCC 工具链文件
-│   ├── STM32N647A0HXQ_FLASH.ld # 链接脚本（内部 Flash 布局）
-│   ├── .cproject / .project    # STM32CubeIDE 工程文件
-│   └── .settings/              # IDE 设置
-├── st_ai_ws/               # ST.AI 工作区（run.ps1 步骤 5 可选产生 network.hex）
-├── .gitignore
-└── README.md
+                          create_model.py
+                               │
+                          matrix_mul.onnx
+                               │
+                    stedgeai-core generate
+                               │
+                    stm32n647_appli/AI/ (NPU 微码)
+                               │
+                    CMake 交叉编译
+                               │
+                    Debug/Network.{elf,hex,bin}
+                               │
+                    pyocd load → 内部 SRAM
+                    pyocd commander → 设置 PC/SP → 运行
 ```
 
----
-
-## 硬件说明
-
-| 项目 | 说明 |
-|------|------|
-| 核心板 | 正点原子 STM32N647 核心板 |
-| MCU | STM32N647A0HXQ (Cortex-M55 + Ethos NPU) |
-| 外部 Flash | MX25UM25645G (256Mb OctoSPI NOR Flash) |
-| 串口 | USART1, PB6(TX)/PB7(RX), 115200 8N1 |
-| 调试接口 | 板载 ST-LINK, Type-C 连接 |
-| External Loader | `MX25UM25645G_ATK-CNN647B_ExtMemLoader.stldr` |
-
-> **注意**：主程序使用 **USART1** (PB6/PB7)，而非 USART3。需确保开发板的 USART1 引脚已引出至串口模块。
-
-### BOOT 模式配置
-
-| 模式 | BOOT0 | BOOT1 | 用途 |
-|------|-------|-------|------|
-| **Development boot** | 任意 | **3.3V** | 烧录/编程 |
-| **Flash boot** | **GND** | **GND** | 正常运行 |
-
----
-
-## 开发环境约定
-
-| 项目 | 约定 |
-|------|------|
-| **操作系统** | Windows 11 / WSL2 (Ubuntu 22.04) |
-| **Shell** | PowerShell (pwsh) 7+ (首选), bash (备用) |
-| **Python** | 3.12 (Miniconda, 环境名 `stm32n6_ai`) |
-| **ARM 工具链** | `arm-none-eabi-gcc` ≥ 14.3 (GNU Arm Embedded Toolchain) |
-| **构建系统** | CMake ≥ 3.20 + Unix Makefiles |
-| **ST.AI 中间件** | `D:/Downloads/NPU/4.0/Middlewares/ST/AI/` |
-| **STM32CubeProgrammer** | ≥ 2.16.0 |
-| **stedgeai-core** | ST Edge AI Core 工具 |
-| **External Loader** | 需手动复制到 CubeProgrammer `ExternalLoader/` 目录 |
-
----
-
-## 完整构建链
-
-```
-.\run.ps1
-  ├─ create_model.py               → matrix_mul.onnx
-  └─ stedgeai-core                 → stm32n647_appli/AI/ (network.h/c, network_data.h/c, ...)
-                                       │
-                                        ▼ CMake 交叉编译
-                                   Debug/Network.elf
-                                       │
-                                        ▼ .\deploy.ps1 (STM32CubeProgrammer)
-                                   烧录到内部 Flash (0x08000000)
-```
-
-### 分步构建（不依赖 run.ps1）
+### 独立分步（不依赖 run.ps1 / build.ps1）
 
 ```powershell
 # 1. 生成 ONNX 模型
 conda activate stm32n6_ai
 python create_model.py
 
-# 2. 转换为 NPU 微码到 stm32n647_appli/AI/
-stedgeai-core generate --model matrix_mul.onnx --target stm32n6 --type onnx --output stm32n647_appli/AI --allocate-inputs --allocate-outputs --verbosity 0
+# 2. 转换为 NPU 微码
+stedgeai-core generate --model matrix_mul.onnx --target stm32n6 --type onnx `
+  --output stm32n647_appli/AI --allocate-inputs --allocate-outputs --verbosity 0
 
 # 3. CMake 编译
 cd stm32n647_appli
-.\build.ps1
-
-# 4. 生成烧录映像（build.ps1 已自动完成，手动方式如下）
-# arm-none-eabi-objcopy -O ihex Debug/Network.elf Debug/Network.hex
-# arm-none-eabi-objcopy -O binary Debug/Network.elf Debug/Network.bin
-
-# 5. 烧录（Development boot 模式）
+cmake -DCMAKE_TOOLCHAIN_FILE=cubeide-gcc.cmake -S . -B Debug -G"Unix Makefiles" -DCMAKE_BUILD_TYPE=Debug
+make -C Debug -j
 cd ..
-.\deploy.ps1
+
+# 4. 下载 + 运行
+.\download.ps1
 ```
+
+---
+
+## 硬件规格
+
+| 项目 | 说明 |
+|------|------|
+| 核心板 | 正点原子 STM32N647 核心板 |
+| MCU | STM32N647A0HXQ (Cortex-M55 + Ethos NPU) |
+| 外部 Flash | MX25UM25645G（256Mb OctoSPI NOR Flash, 0x70000000） |
+| 外部 RAM | 32MB HyperRAM（0x90000000，DEBUG 模式启用） |
+| 串口 | USART1, PB6(TX) / PB7(RX), 115200 8N1 |
+| 调试接口 | 板载 ST-LINK, Type-C |
+| LED | PE10（LED0）、PG10 |
+
+---
+
+## 开发环境
+
+| 项目 | 约定 |
+|------|------|
+| **操作系统** | Windows 11 / WSL2 (Ubuntu 22.04) |
+| **Shell** | PowerShell (pwsh) 7+（首选）, bash（备用） |
+| **Python** | 3.12 (Miniconda, 环境名 `stm32n6_ai`) |
+| **ARM 工具链** | `arm-none-eabi-gcc` ≥ 14.3 |
+| **构建系统** | CMake ≥ 3.20 + Unix Makefiles / Ninja |
+| **ST.AI 中间件** | `D:/Downloads/NPU/4.0/Middlewares/ST/AI/` |
+| **STM32Cube_FW_N6** | `D:/BaiduNetdiskDownload/SoftwarePackage/STM32Cube_FW_N6_V1.0.0/` |
+| **BSP 驱动** | `D:/BaiduNetdiskDownload/SoftwarePackage/Drivers/BSP/` |
+| **烧录工具** | pyocd（`pip install pyocd`）+ `pyocd pack install stm32n647` |
+| **stedgeai-core** | 自动检测 `D:/ST/STEdgeAI/*/` 或 pip 安装 |
 
 ### 初始化 conda 环境
 
 ```powershell
 conda create -n stm32n6_ai python=3.12 -y
 conda activate stm32n6_ai
-pip install numpy onnx
+pip install numpy onnx pyocd
+pyocd pack install stm32n647
 ```
 
 ---
 
-## 软件架构说明
-
-### 裸机实现（无 HAL）
-
-项目采用**寄存器级裸机**实现，不依赖 STM32 HAL 库：
-
-- **系统初始化** (`SystemInit`)：由启动文件调用，初始化 FPU 和 UART
-- **FPU 初始化**：直接操作 `SCB->CPACR` 寄存器
-- **UART 初始化**：直接操作 USART1、GPIOB 和 RCC 寄存器
-  - 时钟：RCC_AHB5ENR (GPIOB) + RCC_APB2ENR (USART1)
-  - GPIO：PB6/PB7 复用功能 AF7 (USART1)
-  - 波特率：`BRR = HSI_64MHz / 115200`
-- **printf 输出**：重定向 `__io_putchar()` 到 USART1，支持 `%f` 格式
-
-### ST.AI 运行时
-
-链接时需要 `NetworkRuntime1200_CM55_GCC.a` 运行时库（位于 `D:/Downloads/NPU/4.0/Middlewares/ST/AI/Lib/GCC/ARMCortexM55/`），提供 `forward_lite_dense_if32of32wf32` 等 NPU 核心加速函数。
-
-### 推理流程（main.c）
+## 项目结构
 
 ```
-1. stai_network_init()         → 初始化网络上下文
-2. stai_network_set_activations() → 分配激活缓冲区
-3. stai_network_get_inputs()   → 获取输入/输出指针
-4. memcpy(input_ptr, data)     → 填充输入数据
-5. stai_network_run()          → 执行 NPU 推理
-6. printf(output_ptr)          → 打印推理结果
+├── build.ps1                  # CMake 交叉编译脚本
+├── run.ps1                    # 一键部署入口（生成 ONNX → 转 NPU 微码）
+├── download.ps1               # pyocd 烧录 + 运行脚本
+├── create_model.py             # ONNX Gemm 模型生成器
+├── Makefile                   # make 入口（代理 run.ps1 / build.ps1）
+├── matrix_mul.onnx            # 生成的 ONNX 模型（.gitignore）
+│
+├── stm32n647_appli/           # STM32N647 固件工程
+│   ├── AI/                        # ⚡ NPU 微码（run.ps1 直接输出至此）
+│   │   ├── network.h / .c         # 网络 API
+│   │   ├── network_data.h / .c    # 权重数据
+│   │   ├── network_details.h      # 网络详细信息
+│   │   └── stai.h                 # ST.AI 运行时 API
+│   ├── Core/                      # STM32CubeMX 核心代码
+│   │   ├── Src/
+│   │   │   ├── main.c             # ★ 主程序（HAL + AI 推理 + UART 回显 + LED）
+│   │   │   ├── stm32n6xx_it.c     # 中断服务
+│   │   │   ├── stm32n6xx_hal_msp.c
+│   │   │   ├── secure_nsc.c       # 安全非安全调用
+│   │   │   └── system_stm32n6xx_s.c
+│   │   └── Inc/                   # 头文件
+│   ├── Sources/                   # 辅助源文件（syscalls / sysmem）
+│   ├── Startup/                   # 汇编启动文件
+│   ├── Secure_nsclib/             # 安全非安全库接口
+│   ├── Debug/                     # CMake 编译输出
+│   │   ├── Network.elf / .hex / .bin
+│   │   └── test.map
+│   ├── CMakeLists.txt
+│   ├── CMakePresets.json
+│   ├── cubeide-gcc.cmake          # ARM GCC 工具链文件
+│   ├── STM32N647A0HXQ_FLASH.ld   # 链接脚本
+│   └── .cproject / .project       # STM32CubeIDE 工程
+│
+├── st_ai_ws/                 # ST.AI 工作区（可选）
+├── .gitignore / .gitattributes
+└── README.md
 ```
 
 ---
 
-## create_model.py 核心原理
+## 软件架构
+
+### 主程序功能
+
+`main.c` 为 **AI 推理 + UART 回显综合程序**：
+
+- **AI 初始化**：创建网络上下文 → 设置激活/权重缓冲区 → 验证状态
+- **定时推理**：每 5000 次循环执行 `stai_network_run()`，输入 `[1.0, 2.0, 3.0, 4.0]`，打印输出
+- **UART 回显**：用户输入以回车结束，开发板回显
+- **LED 闪烁**：指示系统运行
+
+### HAL 初始化流程
+
+```
+SCB_EnableICache() → SCB_EnableDCache() → SystemCoreClockUpdate()
+→ HAL_Init() → SystemIsolation_Config()
+→ [DEBUG] MX_XSPI1_Init() → HyperRAM_Init() → EnableMemoryMappedMode()
+→ MX_USART1_UART_Init() → MX_GPIO_Init()
+```
+
+- **Cache**：使能 I-Cache 和 D-Cache
+- **系统隔离**：RIF（资源隔离框架），所有外设设为安全特权模式
+- **printf**：通过标准 `printf()` 输出到 UART，依赖 `--specs=nano.specs` + `-u,_printf_float`
+- **TrustZone**：支持安全/非安全隔离，通过 `secure_nsc.c/h` 实现调用接口
+
+### 中断服务
+
+| 中断 | 文件 | 用途 |
+|------|------|------|
+| `SysTick_Handler` | `stm32n6xx_it.c` | HAL 时基 |
+| `USART1_IRQHandler` | `stm32n6xx_it.c` | UART 接收中断 |
+
+### ST.AI 运行时（stai_\* API）
+
+推理流程：
+
+```c
+#include "network.h"
+#include "network_data.h"
+
+/* 静态缓冲区 */
+static uint8_t ai_network_ctx_buf[STAI_NETWORK_CONTEXT_SIZE]
+    __attribute__((aligned(STAI_NETWORK_CONTEXT_ALIGNMENT)));
+static uint8_t ai_activations_buf[STAI_NETWORK_ACTIVATIONS_SIZE_BYTES]
+    __attribute__((aligned(STAI_NETWORK_ACTIVATION_1_ALIGNMENT)));
+
+/* 初始化 */
+stai_network* network = (stai_network*)ai_network_ctx_buf;
+stai_network_init(network);
+
+/* 设置激活与权重 */
+stai_ptr activations[STAI_NETWORK_ACTIVATIONS_NUM];
+activations[0] = (stai_ptr)ai_activations_buf;
+stai_network_set_activations(network, activations, STAI_NETWORK_ACTIVATIONS_NUM);
+
+stai_ptr weights[STAI_NETWORK_WEIGHTS_NUM];
+weights[0] = (stai_ptr)g_network_weights_array;
+stai_network_set_weights(network, weights, STAI_NETWORK_WEIGHTS_NUM);
+
+/* 推理 */
+float input_data[STAI_NETWORK_IN_1_SIZE] = {1.0f, 2.0f, 3.0f, 4.0f};
+stai_ptr inputs[STAI_NETWORK_IN_NUM], outputs[STAI_NETWORK_OUT_NUM];
+stai_network_get_inputs(network, inputs, &n_inputs);
+stai_network_get_outputs(network, outputs, &n_outputs);
+memcpy(inputs[0], input_data, STAI_NETWORK_IN_1_SIZE_BYTES);
+stai_network_run(network, STAI_MODE_SYNC);
+float* result = (float*)outputs[0];
+printf("输出: [%.6f, %.6f]\r\n", result[0], result[1]);
+```
+
+### 外部依赖
+
+| 来源 | 路径 | 内容 |
+|------|------|------|
+| STM32Cube_FW_N6 HAL | `Drivers/STM32N6xx_HAL_Driver/` | hal_cortex, hal_gpio, hal_uart, hal_xspi 等 |
+| CMSIS 设备头文件 | `Drivers/CMSIS/Device/ST/STM32N6xx/Include/` | `stm32n647xx.h`, `partition_stm32n647xx.h` |
+| BSP 驱动 | `Drivers/BSP/` | SYS（时钟）、HyperRAM、LED、UART |
+| ST.AI 运行时 | `Middlewares/ST/AI/` | 头文件 + `NetworkRuntime1200_CM55_GCC.a` |
+
+> ST.AI 运行时库提供 NPU 加速函数（如 `forward_lite_dense_if32of32wf32`），链接时需包含 `NetworkRuntime1200_CM55_GCC.a`。
+
+---
+
+## create_model.py 原理
 
 ```python
 from onnx import helper, TensorProto
 
 X = helper.make_tensor_value_info('input', TensorProto.FLOAT, [1, 4])
 Y = helper.make_tensor_value_info('output', TensorProto.FLOAT, [1, 2])
-
-W = np.random.randn(4, 2).astype(np.float32)  # 矩阵 B
+W = np.random.randn(4, 2).astype(np.float32)   # 矩阵 B
 bias = np.zeros((2,), dtype=np.float32)
 
 node = helper.make_node('Gemm', ['input', 'weights', 'bias'], ['output'],
                         alpha=1.0, beta=1.0, transA=0, transB=0)
 ```
-修改 `[1,4]` / `[1,2]` / `[4,2]` 即可实现任意矩阵乘法 `A(m,n) × B(n,p) = C(m,p)`。
+
+修改 `[1,4]` / `[1,2]` / `[4,2]` 即可实现任意 `A(m,n) × B(n,p) = C(m,p)` 矩阵乘法。
 
 ---
 
@@ -254,9 +321,11 @@ node = helper.make_node('Gemm', ['input', 'weights', 'bias'], ['output'],
 
 ### 使用 STM32CubeIDE
 
-项目包含 `.cproject` / `.project` 文件，可直接在 STM32CubeIDE 中打开 `stm32n647_appli/` 工程编译。
+直接打开 `stm32n647_appli/` 工程（已含 `.cproject` / `.project`）。
 
-### 使用命令行 CMake
+### 使用命令行
+
+`build.ps1` 自动探测 Ninja / Make，优先使用 Ninja 加速。
 
 ```powershell
 cd stm32n647_appli
@@ -264,20 +333,26 @@ cmake -DCMAKE_TOOLCHAIN_FILE=cubeide-gcc.cmake -S . -B Debug -G"Unix Makefiles" 
 make -C Debug -j
 ```
 
-关键配置 (`CMakeLists.txt`)：
-- **CPU**: `-mcpu=cortex-m55`
-- **FPU**: `-mfpu=fpv5-d16`（双精度浮点）
-- **ABI**: `-mfloat-abi=hard`
-- **运行时**: `--specs=nano.specs` + `--specs=nosys.specs`
-- **链接优化**: `--gc-sections`, `-u,_printf_float`
-- **ST.AI 库**: `NetworkRuntime1200_CM55_GCC.a`
+### CMakeLists.txt 关键配置
+
+| 配置项 | 值 |
+|--------|-----|
+| CPU | `-mcpu=cortex-m55` |
+| FPU | `-mfpu=fpv5-d16`（双精度） |
+| ABI | `-mfloat-abi=hard` |
+| TrustZone | `-mcmse` |
+| 运行时 | `--specs=nano.specs` + `--specs=nosys.specs` |
+| 链接优化 | `--gc-sections`, `-u,_printf_float` |
+| ST.AI 库 | `NetworkRuntime1200_CM55_GCC.a` |
+| HAL 驱动 | 直接包含源文件路径（绝对路径） |
+| BSP 驱动 | 直接包含源文件路径（绝对路径） |
 
 ### 常见链接错误
 
 | 错误 | 原因 | 修复 |
 |------|------|------|
-| `undefined reference to forward_lite_dense_if32of32wf32` | 缺少 ST.AI 运行时库 | 确认 `NetworkRuntime1200_CM55_GCC.a` 链接正确 |
-| `unrecognized option '--major-image-version'` | 链接器路径错误（LD 被 MSYS2 替代） | 修正 `cubeide-gcc.cmake` 中的 `CMAKE_LINKER` |
+| `undefined reference to forward_lite_dense_if32of32wf32` | 缺少 ST.AI 运行时库 | 确认 `NetworkRuntime1200_CM55_GCC.a` 正确链接 |
+| `unrecognized option '--major-image-version'` | 链接器路径错误（MSYS2 LD 冲突） | 修正 `cubeide-gcc.cmake` 中 `CMAKE_LINKER` |
 | `undefined reference to _printf_float` | 未启用浮点打印 | 添加 `-Wl,-u,_printf_float` 链接标志 |
 | `undefined reference to __DSB` | 使用了 CMSIS 函数 | 改用内联汇编 `__asm volatile("dsb")` |
 
@@ -285,40 +360,74 @@ make -C Debug -j
 
 ## 内存布局
 
-### 内部 Flash (0x08000000 ~ 0x09FFFFFF, 32MB)
+### 内部 RAM（0x34000400 ~ 0x34080000，约 2047KB）
 
-| 段 | 地址 | 大小 | 内容 |
-|----|------|------|------|
-| `.isr_vector` | 0x34000400 | 0x34C | 中断向量表 |
-| `.text` | 0x34000750 | ~17KB | 代码 + 运行时库 |
-| `.rodata` | 0x34004A20 | ~2.4KB | 只读数据（权重等） |
-| `.data` | 0x34080000 | 0x1C8 | 初始化的全局变量 |
-| `.bss` | 0x340801C8 | 0x16C | 未初始化全局变量 |
-| `_user_heap_stack` | 0x34080334 | 0x604 | 堆 + 栈 |
+程序加载到内部 RAM 中运行（非 XIP）。地址区间来自 `STM32N647A0HXQ_FLASH.ld`：
 
-> 链接脚本 `STM32N647A0HXQ_FLASH.ld` 定义了完整的内存布局。
+| 段 | 起始地址 | 内容 |
+|----|---------|------|
+| `.isr_vector` | 0x34000400 | 中断向量表 |
+| `.text` | 紧接其后 | 代码 + 运行时库 |
+| `.rodata` | 紧接其后 | 只读数据（权重等） |
+| `.ARM.extab / .ARM` | 紧接其后 | 异常处理表 |
+| `.preinit_array / .init_array / .fini_array` | — | 构造/析构函数表 |
+| `.data` | — | 初始化全局变量 |
+| `.gnu.sgstubs` | — | Secure Gateway 存根 |
+| `.bss` | — | 未初始化全局变量 |
+| `._user_heap_stack` | — | 堆（0x200）+ 栈（0x800） |
+
+> 各段精确偏移量见 `Debug/test.map`。
+
+### 外部 HyperRAM（0x90000000，32MB）
+
+DEBUG 模式下通过 XSPI1 初始化，映射到 0x90000000，用于调试数据存储。
+
+### 外部 NOR Flash（0x70000000，MX25UM25645G）
+
+通过 OSPI 接口映射，当前固件未使用（所有代码加载到内部 SRAM 运行）。
 
 ---
 
 ## 常见问题
 
-**烧录失败 `failed to erase memory`** → BOOT1 接 3.3V，重新上电
+**pyocd 无法识别目标芯片**
 
-**烧录失败 `external loader file does not exist`** → 复制 External Loader 到 CubeProgrammer 目录：
 ```powershell
-copy "D:\BaiduNetdiskDownload\SoftwarePackage\External_Loader\MX25UM25645G_ATK-CNN647B\Binary\MX25UM25645G_ATK-CNN647B_ExtMemLoader.stldr" `
-    "C:\Users\Yuan\AppData\Local\stm32cube\bundles\programmer\2.22.0+st.1\bin\ExternalLoader\"
+pyocd pack find stm32n647    # 搜索目标包
+pyocd pack install stm32n647 # 安装
 ```
 
-**串口无输出** → 检查波特率 115200、数据位 8、停止位 1、无校验；确认 USART1 使用了 PB6(TX)/PB7(RX)；确认 BOOT 模式正确
+**烧录后程序不运行**
 
-**CMake 配置失败** → 确保 ARM GCC 工具链在 PATH 中：
+检查 `download.ps1` 中的 PC/SP 地址是否与链接脚本匹配。在 `test.map` 中查找：
+
+```powershell
+Select-String "Reset_Handler" .\stm32n647_appli\Debug\test.map
+Select-String "_estack" .\stm32n647_appli\Debug\test.map
+```
+
+**串口无输出**
+
+检查：波特率 115200、8N1、USART1 使用 PB6(TX)/PB7(RX)。
+
+**CMake 配置失败**
+
+确保 ARM GCC 工具链在 PATH 中：
+
 ```powershell
 $env:PATH = "C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\14.3 rel1\bin;$env:PATH"
 ```
 
+**`build.ps1` 找不到 `cubeide-gcc.cmake`**
+
+确保在项目根目录执行 `.\build.ps1`，脚本会自动切换到 `stm32n647_appli/`。
+
+**编译报错 HAL 头文件找不到**
+
+确认 `stm32n6xx_hal_conf.h` 中开启的外设模块与 `CMakeLists.txt` 中包含的源文件一致。头文件路径在 `cubeide-gcc.cmake` 中配置。
+
 ---
 
-> **版本**: 2.0.0（CMake 裸机版）  
+> **版本**: 3.0.0（AI 推理 + stai_\* API）  
 > **适用平台**: 正点原子 STM32N647 核心板  
-> **仓库**: https://github.com/yuanchilin/stm32n6-ai-deploy
+> **仓库**: [https://github.com/yuanchilin/stm32n6-ai-deploy](https://github.com/yuanchilin/stm32n6-ai-deploy)
